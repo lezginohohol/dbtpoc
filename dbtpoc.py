@@ -1,6 +1,6 @@
 
-import jsonschema
-import argparse
+import jsonschema, json
+import argparse, os
 from apiclient.discovery import build
 from httplib2 import Http
 from oauth2client import file, client, tools
@@ -14,7 +14,7 @@ if not creds or creds.invalid:
     creds = tools.run_flow(flow, store)
 service = build('sheets', 'v4', http=creds.authorize(Http()))
 SPREADSHEET_ID = '1gatrRk-pNlDwW9fUIrLi78b8sSKZmw6PtjFJwUpi9pM'
-RANGE_NAME = 'Schema'
+RANGE_NAME = 'schema'
 schema = service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID,
                                              range=RANGE_NAME).execute().get('values', [])
 
@@ -38,8 +38,6 @@ for l in schema:
         subtables.update({subtable: {subcol: {'type': l[type_index],
                                               'mode': l[mode_index]}}})
 
-pprint(subtables)
-
 class FKeyValidator():
     pass
 
@@ -56,13 +54,13 @@ formatted_types = {
 }
 
 stdtypes = {
-    "String": "string",
-    "Date": "string",
-    "TZ": "string",
-    "Integer": "integer",
-    "DatetimeJSON": "string",
-    "Float": "number",
-    "Array": "array"
+    "String": {"type": "string"},
+    "Date": {"type": "string", "pattern": "[0-9]{4}-[0-9]{2}-[0-9]{2}"},
+    "TZ": {"type": "string"},
+    "Integer": {"type": "integer"},
+    "DatetimeJSON": {"type": "string", "pattern": "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\+[0-9]{2}:[0-9]{2}"},
+    "Float": {"type": "number"},
+    "Array": {"type": "array"}
 }
 
 # creating schemas for each datasheet
@@ -76,10 +74,10 @@ for table, fields in subtables.items():
     for field, fieldinfo in fields.items():
         if ":" in fieldinfo['type']:
             pref, val = fieldinfo['type'].split(':')
-            type = formatted_types[pref](val)
+            typedef = formatted_types[pref](val)
         else:
-            type = stdtypes[fieldinfo['type']]
-        subschema["properties"][field]= {"type": type}
+            typedef = stdtypes[fieldinfo['type']]
+        subschema["properties"][field]= typedef
         if fieldinfo['mode'] == "REQUIRED":
             subschema["required"].append(field)
     subschemas[table] = subschema
@@ -96,17 +94,34 @@ for subschema in subschemas:
                 schema, refprop = proptype["type"][1].split("/")
                 subschemas[subschema]["properties"][prop] = subschemas[schema]
 
-
+# retrieving records from sheets
+records={}
 for subtable in subtables:
-    pprint(subtable)
-    pprint(subtables[subtable])
-
-    print("DATA : \n")
+    subrecords = []
 
     subtableval = service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID,
-                                             range=subtable).execute().get('values',[])
+                                                      range=subtable).execute().get('values', [])
     keys = subtableval.pop(0)
     pprint(subtableval)
     for line in subtableval:
         record = {x:y for x, y in zip(keys, line)}
-        pprint(record)
+        subrecords.append(record)
+    records[subtable] = subrecords
+pprint(records)
+
+
+
+# create json-schemas and jsonfiles
+
+for schemaname, schema in subschemas.items():
+    if not os.path.exists('schemas'):
+        os.makedirs('schemas')
+    with open('schemas/' + schemaname + '_schema.json', "w") as outfile:
+        json.dump(schema, outfile)
+
+for recordlist in records:
+    if not os.path.exists('records'):
+        os.makedirs('records')
+    with open('records/' + recordlist + '_data.json', "w") as outfile:
+        data = json.dumps(records[recordlist])
+        json.dump(records[recordlist], outfile)
