@@ -1,10 +1,17 @@
 
 import jsonschema, json
-import argparse, os
+import argparse, os, ast
 from apiclient.discovery import build
 from httplib2 import Http
 from oauth2client import file, client, tools
-from pprint import pprint
+
+parser = argparse.ArgumentParser()
+parser.add_argument("spreadsheet_id")
+parser.add_argument("schema_sheet")
+args = parser.parse_args()
+
+SPREADSHEET_ID = args.spreadsheet_id
+RANGE_NAME = args.schema_sheet
 
 SCOPES = 'https://www.googleapis.com/auth/spreadsheets.readonly'
 store = file.Storage('credentials.json')
@@ -13,8 +20,8 @@ if not creds or creds.invalid:
     flow = client.flow_from_clientsecrets('client_secret.json', SCOPES)
     creds = tools.run_flow(flow, store)
 service = build('sheets', 'v4', http=creds.authorize(Http()))
-SPREADSHEET_ID = '1gatrRk-pNlDwW9fUIrLi78b8sSKZmw6PtjFJwUpi9pM'
-RANGE_NAME = 'schema'
+# SPREADSHEET_ID = '1kEC9nqNKq-COC3ZbCqKW4hsdf3wzLzEPgXcTXcCeOBM'
+# RANGE_NAME = 'schema'
 schema = service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID,
                                              range=RANGE_NAME).execute().get('values', [])
 
@@ -37,9 +44,6 @@ for l in schema:
     else:
         subtables.update({subtable: {subcol: {'type': l[type_index],
                                               'mode': l[mode_index]}}})
-
-class FKeyValidator():
-    pass
 
 def keytype(x):
     return ("FK", x)
@@ -86,32 +90,50 @@ for table, fields in subtables.items():
 # keys (inserting subschema for used datasheet)
 for subschema in subschemas:
     for prop, proptype in subschemas[subschema]["properties"].items():
-        if isinstance(proptype["type"], tuple):
-            if proptype["type"][0] == "FK":
-                schema, refprop = proptype["type"][1].split("/")
-                subschemas[subschema]["properties"][prop]["type"] = subschemas[schema]["properties"][refprop]["type"]
-            elif proptype["type"][0] == "FKR":
-                schema, refprop = proptype["type"][1].split("/")
+        if isinstance(proptype, tuple):
+            if proptype[0] == "FK":
+                schema, refprop = proptype[1].split("/")
+                subschemas[subschema]["properties"][prop] = subschemas[schema]["properties"][refprop]
+            elif proptype[0] == "FKR":
+                schema, refprop = proptype[1].split("/")
                 subschemas[subschema]["properties"][prop] = subschemas[schema]
 
 # retrieving records from sheets
-records={}
-for subtable in subtables:
-    subrecords = []
 
-    subtableval = service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID,
+#
+def get_records(subtable, schemasdict, spr_sh_id, sheetschema, field_name = None, record_id=None):
+    records = []
+    tablevalues = service.spreadsheets().values().get(spreadsheetId=spr_sh_id,
                                                       range=subtable).execute().get('values', [])
-    keys = subtableval.pop(0)
-    pprint(subtableval)
-    for line in subtableval:
-        record = {x:y for x, y in zip(keys, line)}
-        subrecords.append(record)
-    records[subtable] = subrecords
-pprint(records)
+    keys = tablevalues.pop(0)
+    for line in tablevalues:
+        tableline = {x: y for x, y in zip(keys, line)}
+        for key, value in tableline.items():
+            if schemasdict[subtable]["properties"][key]["type"] == "object":
+                referencetable, referencefield = sheetschema[subtable][key]["type"].split(":")[1].split('/')
+                tableline[key] = get_records(referencetable, schemasdict, spr_sh_id, sheetschema, referencefield, value)
+            elif schemasdict[subtable]["properties"][key]["type"] == "array":
+                tableline[key] = ast.literal_eval(value)
+            elif schemasdict[subtable]["properties"][key]["type"] == "integer":
+                tableline[key] = int(value)
+            elif schemasdict[subtable]["properties"][key]["type"] == "number":
+                tableline[key] = float(value)
+        records.append(tableline)
 
+    if record_id:
+        if schemasdict[subtable]["properties"][field_name]["type"] == "integer":
+            record_id = int(record_id)
+        return [rec for rec in records if rec[field_name] == record_id].pop()
+    return records
 
+records = {}
+for subtable in subtables:
+    records[subtable] = get_records(subtable, subschemas, SPREADSHEET_ID, subtables)
 
 # create json-schemas and jsonfiles
+
+jsonschema.validate(records["location"][0], subschemas["location"])
+
 
 for schemaname, schema in subschemas.items():
     if not os.path.exists('schemas'):
